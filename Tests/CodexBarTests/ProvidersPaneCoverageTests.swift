@@ -73,6 +73,15 @@ struct ProvidersPaneCoverageTests {
     }
 
     @Test
+    func `minimax menu bar metric picker is hidden`() {
+        let settings = Self.makeSettingsStore(suite: "ProvidersPaneCoverageTests-minimax-picker")
+        let store = Self.makeUsageStore(settings: settings)
+        let pane = ProvidersPane(settings: settings, store: store)
+
+        #expect(pane._test_menuBarMetricPicker(for: .minimax) == nil)
+    }
+
+    @Test
     func `provider detail plan row formats open router as balance`() {
         let row = ProviderDetailView.planRow(provider: .openrouter, planText: "Balance: $4.61")
 

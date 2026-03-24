@@ -40,19 +40,11 @@ extension StatusItemController {
     }
 
     func dashboardURL(for provider: UsageProvider) -> URL? {
-        if provider == .alibaba {
-            return self.settings.alibabaCodingPlanAPIRegion.dashboardURL
-        }
-
-        let meta = self.store.metadata(for: provider)
-        let urlString: String? = if provider == .claude, self.store.isClaudeSubscription() {
-            meta.subscriptionDashboardURL ?? meta.dashboardURL
-        } else {
-            meta.dashboardURL
-        }
-
-        guard let urlString else { return nil }
-        return URL(string: urlString)
+        let context = ProviderDashboardContext(
+            provider: provider,
+            settings: self.settings,
+            store: self.store)
+        return ProviderCatalog.implementation(for: provider)?.dashboardURL(context: context)
     }
 
     @objc func openCreditsPurchase() {

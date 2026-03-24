@@ -1,5 +1,60 @@
 import Foundation
 
+public struct MiniMaxModelUsageEntry: Sendable {
+    public let modelName: String
+    public let sessionTotal: Int?
+    public let sessionUsed: Int?
+    public let sessionRemaining: Int?
+    public let sessionResetsAt: Date?
+    public let weeklyTotal: Int?
+    public let weeklyUsed: Int?
+    public let weeklyRemaining: Int?
+    public let isWeeklyUnlimited: Bool
+
+    public init(
+        modelName: String,
+        sessionTotal: Int?,
+        sessionUsed: Int?,
+        sessionRemaining: Int?,
+        sessionResetsAt: Date? = nil,
+        weeklyTotal: Int?,
+        weeklyUsed: Int?,
+        weeklyRemaining: Int?,
+        isWeeklyUnlimited: Bool)
+    {
+        self.modelName = modelName
+        self.sessionTotal = sessionTotal
+        self.sessionUsed = sessionUsed
+        self.sessionRemaining = sessionRemaining
+        self.sessionResetsAt = sessionResetsAt
+        self.weeklyTotal = weeklyTotal
+        self.weeklyUsed = weeklyUsed
+        self.weeklyRemaining = weeklyRemaining
+        self.isWeeklyUnlimited = isWeeklyUnlimited
+    }
+
+    public func resetText(style: ResetTimeDisplayStyle, now: Date = Date()) -> String? {
+        guard let resetsAt = self.sessionResetsAt else { return nil }
+        let window = RateWindow(
+            usedPercent: 0,
+            windowMinutes: nil,
+            resetsAt: resetsAt,
+            resetDescription: nil)
+        return UsageFormatter.resetLine(for: window, style: style, now: now)
+    }
+
+    public func normalizedSessionUsage() -> (used: Int, remaining: Int, total: Int)? {
+        guard let total = self.sessionTotal, total > 0 else { return nil }
+        guard self.sessionUsed != nil || self.sessionRemaining != nil else { return nil }
+        let remaining = self.sessionRemaining.map { min(max($0, 0), total) }
+        let used = self.sessionUsed.map { min(max($0, 0), total) }
+            ?? remaining.map { total - $0 }
+        let finalRemaining = remaining ?? used.map { max(0, total - $0) }
+        guard let used, let finalRemaining else { return nil }
+        return (used: used, remaining: finalRemaining, total: total)
+    }
+}
+
 public struct MiniMaxUsageSnapshot: Sendable {
     public let planName: String?
     public let availablePrompts: Int?
@@ -9,6 +64,7 @@ public struct MiniMaxUsageSnapshot: Sendable {
     public let usedPercent: Double?
     public let resetsAt: Date?
     public let updatedAt: Date
+    public let modelEntries: [MiniMaxModelUsageEntry]
 
     public init(
         planName: String?,
@@ -18,7 +74,8 @@ public struct MiniMaxUsageSnapshot: Sendable {
         windowMinutes: Int?,
         usedPercent: Double?,
         resetsAt: Date?,
-        updatedAt: Date)
+        updatedAt: Date,
+        modelEntries: [MiniMaxModelUsageEntry] = [])
     {
         self.planName = planName
         self.availablePrompts = availablePrompts
@@ -28,6 +85,7 @@ public struct MiniMaxUsageSnapshot: Sendable {
         self.usedPercent = usedPercent
         self.resetsAt = resetsAt
         self.updatedAt = updatedAt
+        self.modelEntries = modelEntries
     }
 }
 

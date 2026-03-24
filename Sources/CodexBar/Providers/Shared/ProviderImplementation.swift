@@ -28,6 +28,9 @@ protocol ProviderImplementation: Sendable {
     @MainActor
     func sourceMode(context: ProviderSourceModeContext) -> ProviderSourceMode
 
+    @MainActor
+    func dashboardURL(context: ProviderDashboardContext) -> URL?
+
     func detectVersion(context: ProviderVersionContext) async -> String?
 
     func makeRuntime() -> (any ProviderRuntime)?
@@ -108,6 +111,14 @@ extension ProviderImplementation {
     @MainActor
     func sourceMode(context _: ProviderSourceModeContext) -> ProviderSourceMode {
         .auto
+    }
+
+    @MainActor
+    func dashboardURL(context: ProviderDashboardContext) -> URL? {
+        let meta = context.store.metadata(for: context.provider)
+        let urlString = meta.dashboardURL
+        guard let urlString else { return nil }
+        return URL(string: urlString)
     }
 
     func detectVersion(context: ProviderVersionContext) async -> String? {

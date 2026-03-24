@@ -342,7 +342,9 @@ struct MenuDescriptor {
                 .appendActionMenuEntries(context: actionContext, entries: &entries)
         }
 
-        if metadata?.dashboardURL != nil {
+        if let targetProvider,
+           Self.dashboardURL(for: targetProvider, store: store) != nil
+        {
             entries.append(.action("Usage Dashboard", .dashboard))
         }
         if metadata?.statusPageURL != nil || metadata?.statusLinkURL != nil {
@@ -405,6 +407,14 @@ struct MenuDescriptor {
             return true
         }
         return false
+    }
+
+    private static func dashboardURL(for provider: UsageProvider, store: UsageStore) -> URL? {
+        let context = ProviderDashboardContext(
+            provider: provider,
+            settings: store.settings,
+            store: store)
+        return ProviderCatalog.implementation(for: provider)?.dashboardURL(context: context)
     }
 
     private static func appendRateWindow(

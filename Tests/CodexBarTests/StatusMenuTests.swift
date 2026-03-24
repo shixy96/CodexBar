@@ -263,6 +263,29 @@ struct StatusMenuTests {
     }
 
     @Test
+    func `minimax dashboard URL follows configured region`() {
+        self.disableMenuCardsForTesting()
+        let settings = self.makeSettings()
+        settings.statusChecksEnabled = false
+        settings.refreshFrequency = .manual
+        settings.minimaxAPIRegion = .chinaMainland
+
+        let fetcher = UsageFetcher()
+        let store = UsageStore(fetcher: fetcher, browserDetection: BrowserDetection(cacheTTL: 0), settings: settings)
+        let controller = StatusItemController(
+            store: store,
+            settings: settings,
+            account: fetcher.loadAccountInfo(),
+            updater: DisabledUpdaterController(),
+            preferencesSelection: PreferencesSelection(),
+            statusBar: self.makeStatusBarForTesting())
+
+        let dashboardURL = controller.dashboardURL(for: .minimax)?.absoluteString
+        let expectedURL = settings.minimaxAPIRegion.codingPlanURL.absoluteString
+        #expect(dashboardURL == expectedURL)
+    }
+
+    @Test
     func `merged switcher includes overview tab when multiple providers enabled`() {
         self.disableMenuCardsForTesting()
         let settings = self.makeSettings()

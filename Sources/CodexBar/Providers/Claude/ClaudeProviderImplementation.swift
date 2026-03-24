@@ -1,5 +1,6 @@
 import CodexBarCore
 import CodexBarMacroSupport
+import Foundation
 import SwiftUI
 
 @ProviderImplementationRegistration
@@ -26,6 +27,27 @@ struct ClaudeProviderImplementation: ProviderImplementation {
         _ = settings.claudeOAuthKeychainPromptMode
         _ = settings.claudeOAuthKeychainReadStrategy
         _ = settings.claudeWebExtrasEnabled
+    }
+
+    @MainActor
+    func dashboardURL(context: ProviderDashboardContext) -> URL? {
+        let meta = context.store.metadata(for: context.provider)
+        let snapshot = context.store.snapshot(for: context.provider)
+        let loginMethod = snapshot?.loginMethod(for: context.provider)
+        let sourceLabel = context.store.sourceLabel(for: context.provider)
+        // For Claude, route subscription users to claude.ai/settings/usage instead of console billing
+        let urlString = if Self.prefersClaudeAppDashboard(
+            loginMethod: loginMethod,
+            sourceLabel: sourceLabel,
+            providerCost: snapshot?.providerCost)
+        {
+            meta.subscriptionDashboardURL ?? meta.dashboardURL
+        } else {
+            meta.dashboardURL
+        }
+
+        guard let urlString else { return nil }
+        return URL(string: urlString)
     }
 
     @MainActor
@@ -232,5 +254,40 @@ struct ClaudeProviderImplementation: ProviderImplementation {
             return true
         }
         return false
+    }
+
+    /// Login methods that indicate a consumer/web-based Claude session
+    private static let consumerLoginMethods: Set<String> = [
+        ClaudeUsageDataSource.web.rawValue,
+        "profile",
+        "browser profile",
+    ]
+
+    private static func normalized(_ text: String?) -> String {
+        text?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+    }
+
+    private static func prefersClaudeAppDashboard(
+        loginMethod: String?,
+        sourceLabel: String,
+        providerCost: ProviderCostSnapshot? = nil) -> Bool
+    {
+        if ClaudePlan.isSubscriptionLoginMethod(loginMethod) {
+            return true
+        }
+
+        let normalizedLogin = Self.normalized(loginMethod)
+        if Self.consumerLoginMethods.contains(normalizedLogin) {
+            return true
+        }
+
+        // Quota currency code is a strong signal of a subscription plan
+        if providerCost?.currencyCode == "Quota" {
+            return true
+        }
+
+        let normalizedSource = Self.normalized(sourceLabel)
+        return normalizedSource == ClaudeUsageDataSource.web.rawValue
+            || normalizedSource == "oauth"
     }
 }

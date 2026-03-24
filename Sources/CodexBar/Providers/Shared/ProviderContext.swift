@@ -26,6 +26,12 @@ struct ProviderSourceModeContext {
     let settings: SettingsStore
 }
 
+struct ProviderDashboardContext {
+    let provider: UsageProvider
+    let settings: SettingsStore
+    let store: UsageStore
+}
+
 struct ProviderVersionContext {
     let provider: UsageProvider
     let browserDetection: BrowserDetection

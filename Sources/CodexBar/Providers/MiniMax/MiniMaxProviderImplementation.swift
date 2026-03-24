@@ -16,6 +16,11 @@ struct MiniMaxProviderImplementation: ProviderImplementation {
     }
 
     @MainActor
+    func dashboardURL(context: ProviderDashboardContext) -> URL? {
+        context.settings.minimaxAPIRegion.codingPlanURL
+    }
+
+    @MainActor
     func observeSettings(_ settings: SettingsStore) {
         _ = settings.minimaxCookieSource
         _ = settings.minimaxCookieHeader
@@ -111,6 +116,15 @@ struct MiniMaxProviderImplementation: ProviderImplementation {
             context.settings.minimaxAuthMode()
         }
 
+        let openDashboard: @MainActor () -> Void = {
+            let dashboardContext = ProviderDashboardContext(
+                provider: context.provider,
+                settings: context.settings,
+                store: context.store)
+            guard let url = self.dashboardURL(context: dashboardContext) else { return }
+            NSWorkspace.shared.open(url)
+        }
+
         return [
             ProviderSettingsFieldDescriptor(
                 id: "minimax-api-token",
@@ -125,9 +139,7 @@ struct MiniMaxProviderImplementation: ProviderImplementation {
                         title: "Open Coding Plan",
                         style: .link,
                         isVisible: nil,
-                        perform: {
-                            NSWorkspace.shared.open(context.settings.minimaxAPIRegion.codingPlanURL)
-                        }),
+                        perform: openDashboard),
                 ],
                 isVisible: nil,
                 onActivate: { context.settings.ensureMiniMaxAPITokenLoaded() }),
@@ -144,14 +156,32 @@ struct MiniMaxProviderImplementation: ProviderImplementation {
                         title: "Open Coding Plan",
                         style: .link,
                         isVisible: nil,
-                        perform: {
-                            NSWorkspace.shared.open(context.settings.minimaxAPIRegion.codingPlanURL)
-                        }),
+                        perform: openDashboard),
                 ],
                 isVisible: {
                     authMode().allowsCookies && context.settings.minimaxCookieSource == .manual
                 },
                 onActivate: { context.settings.ensureMiniMaxCookieLoaded() }),
         ]
+    }
+
+    @MainActor
+    func appendUsageMenuEntries(context: ProviderMenuUsageContext, entries: inout [ProviderMenuEntry]) {
+        guard let modelEntries = context.snapshot?.minimaxUsage?.modelEntries, !modelEntries.isEmpty else { return }
+        let resetStyle = context.settings.resetTimeDisplayStyle
+
+        for modelEntry in modelEntries {
+            guard let line = Self.modelUsageLine(modelEntry, style: resetStyle) else { continue }
+            entries.append(.text(line, .secondary))
+        }
+    }
+
+    private static func modelUsageLine(
+        _ entry: MiniMaxModelUsageEntry,
+        style: ResetTimeDisplayStyle,
+        now: Date = Date()) -> String?
+    {
+        guard let detail = entry.resetText(style: style, now: now) else { return nil }
+        return "\(entry.modelName): \(detail)"
     }
 }

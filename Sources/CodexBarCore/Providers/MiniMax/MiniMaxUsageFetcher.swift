@@ -8,6 +8,9 @@ public struct MiniMaxUsageFetcher: Sendable {
     private static let codingPlanPath = "user-center/payment/coding-plan"
     private static let codingPlanQuery = "cycle_type=3"
     private static let codingPlanRemainsPath = "v1/api/openplatform/coding_plan/remains"
+    private static let remainsEnrichmentDelayNanoseconds: UInt64 = 50_000_000
+    private static let remainsEnrichmentTimeoutNanoseconds: UInt64 = 200_000_000
+
     private struct RemainsContext {
         let authorizationToken: String?
         let groupID: String?
@@ -25,25 +28,59 @@ public struct MiniMaxUsageFetcher: Sendable {
             throw MiniMaxUsageError.invalidCredentials
         }
 
+        let remainsContext = RemainsContext(
+            authorizationToken: authorizationToken,
+            groupID: groupID)
+        let remainsTask = Task { () -> Result<MiniMaxUsageSnapshot, Error> in
+            do {
+                try await Task.sleep(nanoseconds: Self.remainsEnrichmentDelayNanoseconds)
+                try Task.checkCancellation()
+                let snapshot = try await self.fetchCodingPlanRemains(
+                    cookie: cookie,
+                    remainsContext: remainsContext,
+                    region: region,
+                    environment: environment,
+                    now: now)
+                return .success(snapshot)
+            } catch {
+                return .failure(error)
+            }
+        }
+
         do {
-            return try await self.fetchCodingPlanHTML(
+            let htmlSnapshot = try await self.fetchCodingPlanHTML(
                 cookie: cookie,
                 authorizationToken: authorizationToken,
                 region: region,
                 environment: environment,
                 now: now)
+
+            guard htmlSnapshot.modelEntries.isEmpty else {
+                remainsTask.cancel()
+                return htmlSnapshot
+            }
+            // Wait for the remains enrichment task with a timeout
+            let remainsSnapshot = await self.awaitRemainsWithTimeout(
+                remainsTask: remainsTask,
+                timeoutNanoseconds: Self.remainsEnrichmentTimeoutNanoseconds)
+            if let remainsSnapshot {
+                return self.mergedSnapshot(remains: remainsSnapshot, html: htmlSnapshot)
+            }
+            return htmlSnapshot
         } catch let error as MiniMaxUsageError {
             if case .parseFailed = error {
                 Self.log.debug("MiniMax coding plan HTML parse failed, trying remains API")
-                return try await self.fetchCodingPlanRemains(
-                    cookie: cookie,
-                    remainsContext: RemainsContext(
-                        authorizationToken: authorizationToken,
-                        groupID: groupID),
-                    region: region,
-                    environment: environment,
-                    now: now)
+                if let snapshot = await self.awaitRemainsWithTimeout(
+                    remainsTask: remainsTask,
+                    timeoutNanoseconds: Self.remainsEnrichmentTimeoutNanoseconds)
+                {
+                    return snapshot
+                }
             }
+            remainsTask.cancel()
+            throw error
+        } catch {
+            remainsTask.cancel()
             throw error
         }
     }
@@ -107,6 +144,53 @@ public struct MiniMaxUsageFetcher: Sendable {
         }
 
         return try MiniMaxUsageParser.parseCodingPlanRemains(data: data, now: now)
+    }
+
+    /// NOTE: When the timeout wins, the underlying URLSession request in remainsTask may still be in-flight.
+    /// remainsTask.cancel() sets the cancellation flag but cannot abort an already-started network request;
+    /// the response will simply be discarded.
+    private static func awaitRemainsWithTimeout(
+        remainsTask: Task<Result<MiniMaxUsageSnapshot, Error>, Never>,
+        timeoutNanoseconds: UInt64) async -> MiniMaxUsageSnapshot?
+    {
+        await withTaskGroup(of: MiniMaxUsageSnapshot?.self) { group in
+            group.addTask {
+                switch await remainsTask.value {
+                case let .success(snapshot): snapshot
+                case .failure: nil
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                return nil
+            }
+            // The first task to complete wins — either the remains result or the timeout
+            let first = await group.next()
+            remainsTask.cancel()
+            group.cancelAll()
+            switch first {
+            case let .some(result):
+                return result
+            case .none:
+                return nil
+            }
+        }
+    }
+
+    private static func mergedSnapshot(
+        remains: MiniMaxUsageSnapshot,
+        html: MiniMaxUsageSnapshot) -> MiniMaxUsageSnapshot
+    {
+        MiniMaxUsageSnapshot(
+            planName: html.planName ?? remains.planName,
+            availablePrompts: html.availablePrompts,
+            currentPrompts: html.currentPrompts,
+            remainingPrompts: html.remainingPrompts,
+            windowMinutes: html.windowMinutes,
+            usedPercent: html.usedPercent,
+            resetsAt: html.resetsAt,
+            updatedAt: html.updatedAt,
+            modelEntries: remains.modelEntries.isEmpty ? html.modelEntries : remains.modelEntries)
     }
 
     private static func fetchCodingPlanHTML(
@@ -382,27 +466,45 @@ struct MiniMaxComboCard: Decodable {
 }
 
 struct MiniMaxModelRemains: Decodable {
+    let modelName: String?
     let currentIntervalTotalCount: Int?
     let currentIntervalUsageCount: Int?
+    let currentWeeklyTotalCount: Int?
+    let currentWeeklyUsageCount: Int?
     let startTime: Int?
     let endTime: Int?
     let remainsTime: Int?
+    let weeklyStartTime: Int?
+    let weeklyEndTime: Int?
+    let weeklyRemainsTime: Int?
 
     private enum CodingKeys: String, CodingKey {
+        case modelName = "model_name"
         case currentIntervalTotalCount = "current_interval_total_count"
         case currentIntervalUsageCount = "current_interval_usage_count"
+        case currentWeeklyTotalCount = "current_weekly_total_count"
+        case currentWeeklyUsageCount = "current_weekly_usage_count"
         case startTime = "start_time"
         case endTime = "end_time"
         case remainsTime = "remains_time"
+        case weeklyStartTime = "weekly_start_time"
+        case weeklyEndTime = "weekly_end_time"
+        case weeklyRemainsTime = "weekly_remains_time"
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.modelName = try container.decodeIfPresent(String.self, forKey: .modelName)
         self.currentIntervalTotalCount = MiniMaxDecoding.decodeInt(container, forKey: .currentIntervalTotalCount)
         self.currentIntervalUsageCount = MiniMaxDecoding.decodeInt(container, forKey: .currentIntervalUsageCount)
+        self.currentWeeklyTotalCount = MiniMaxDecoding.decodeInt(container, forKey: .currentWeeklyTotalCount)
+        self.currentWeeklyUsageCount = MiniMaxDecoding.decodeInt(container, forKey: .currentWeeklyUsageCount)
         self.startTime = MiniMaxDecoding.decodeInt(container, forKey: .startTime)
         self.endTime = MiniMaxDecoding.decodeInt(container, forKey: .endTime)
         self.remainsTime = MiniMaxDecoding.decodeInt(container, forKey: .remainsTime)
+        self.weeklyStartTime = MiniMaxDecoding.decodeInt(container, forKey: .weeklyStartTime)
+        self.weeklyEndTime = MiniMaxDecoding.decodeInt(container, forKey: .weeklyEndTime)
+        self.weeklyRemainsTime = MiniMaxDecoding.decodeInt(container, forKey: .weeklyRemainsTime)
     }
 }
 
@@ -442,6 +544,32 @@ enum MiniMaxDecoding {
 }
 
 enum MiniMaxUsageParser {
+    private struct NormalizedModelUsage {
+        let modelName: String
+        let sessionTotal: Int?
+        let sessionUsed: Int?
+        let sessionRemaining: Int?
+        let weeklyTotal: Int?
+        let weeklyUsed: Int?
+        let weeklyRemaining: Int?
+        let isWeeklyUnlimited: Bool
+        let windowMinutes: Int?
+        let resetsAt: Date?
+
+        var entry: MiniMaxModelUsageEntry {
+            MiniMaxModelUsageEntry(
+                modelName: self.modelName,
+                sessionTotal: self.sessionTotal,
+                sessionUsed: self.sessionUsed,
+                sessionRemaining: self.sessionRemaining,
+                sessionResetsAt: self.resetsAt,
+                weeklyTotal: self.weeklyTotal,
+                weeklyUsed: self.weeklyUsed,
+                weeklyRemaining: self.weeklyRemaining,
+                isWeeklyUnlimited: self.isWeeklyUnlimited)
+        }
+    }
+
     static func decodePayload(data: Data) throws -> MiniMaxCodingPlanPayload {
         let decoder = JSONDecoder()
         return try decoder.decode(MiniMaxCodingPlanPayload.self, from: data)
@@ -498,51 +626,122 @@ enum MiniMaxUsageParser {
             throw MiniMaxUsageError.apiError(message)
         }
 
-        guard let first = payload.data.modelRemains.first else {
+        let validModels = self.orderedValidModels(from: payload.data.modelRemains, now: now)
+        guard let primaryModel = validModels.first else {
             throw MiniMaxUsageError.parseFailed("Missing coding plan data.")
         }
 
-        let total = first.currentIntervalTotalCount
-        let remaining = first.currentIntervalUsageCount
+        let total = primaryModel.sessionTotal
+        let remaining = primaryModel.sessionRemaining
         let usedPercent = self.usedPercent(total: total, remaining: remaining)
-
-        let windowMinutes = self.windowMinutes(
-            start: self.dateFromEpoch(first.startTime),
-            end: self.dateFromEpoch(first.endTime))
-
-        let resetsAt = self.resetsAt(
-            end: self.dateFromEpoch(first.endTime),
-            remains: first.remainsTime,
-            now: now)
-
         let planName = self.parsePlanName(data: payload.data)
-
-        if planName == nil, total == nil, usedPercent == nil {
-            throw MiniMaxUsageError.parseFailed("Missing coding plan data.")
-        }
-
-        let currentPrompts: Int? = if let total, let remaining {
-            max(0, total - remaining)
-        } else {
-            nil
-        }
 
         return MiniMaxUsageSnapshot(
             planName: planName,
             availablePrompts: total,
-            currentPrompts: currentPrompts,
+            currentPrompts: primaryModel.sessionUsed,
             remainingPrompts: remaining,
-            windowMinutes: windowMinutes,
+            windowMinutes: primaryModel.windowMinutes,
             usedPercent: usedPercent,
-            resetsAt: resetsAt,
-            updatedAt: now)
+            resetsAt: primaryModel.resetsAt,
+            updatedAt: now,
+            modelEntries: validModels.map(\.entry))
     }
 
     private static func usedPercent(total: Int?, remaining: Int?) -> Double? {
-        guard let total, total > 0, let remaining else { return nil }
-        let used = max(0, total - remaining)
+        guard let total, total > 0, let remaining = self.normalizedRemaining(total: total, remaining: remaining) else {
+            return nil
+        }
+        let used = total - remaining
         let percent = Double(used) / Double(total) * 100
         return min(100, max(0, percent))
+    }
+
+    private static func orderedValidModels(
+        from models: [MiniMaxModelRemains],
+        now: Date) -> [NormalizedModelUsage]
+    {
+        let normalized = models.compactMap { self.normalizeModelUsage($0, now: now) }
+        guard let primaryIndex = normalized.firstIndex(where: { self.isPrimaryTextModel($0.modelName) }) else {
+            return normalized
+        }
+
+        var ordered = [normalized[primaryIndex]]
+        ordered.append(contentsOf: normalized.enumerated().compactMap { index, model in
+            index == primaryIndex ? nil : model
+        })
+        return ordered
+    }
+
+    private static func normalizeModelUsage(_ model: MiniMaxModelRemains, now: Date) -> NormalizedModelUsage? {
+        guard self.isValidModel(model) else { return nil }
+
+        let modelName = self.normalizedModelName(model.modelName)
+        let sessionTotal = self.normalizedTotal(model.currentIntervalTotalCount)
+        // MiniMax API: current_interval_usage_count is the remaining (unused) count, not the used count
+        let sessionRemaining = self.normalizedRemaining(total: sessionTotal, remaining: model.currentIntervalUsageCount)
+        let sessionUsed = self.usedCount(total: sessionTotal, remaining: sessionRemaining)
+
+        let weeklyUnlimited = self.isWeeklyUnlimited(model)
+        let weeklyTotal = self.normalizedTotal(model.currentWeeklyTotalCount)
+        // MiniMax API: current_weekly_usage_count is likewise the remaining (unused) count
+        let weeklyRemaining = self.normalizedRemaining(total: weeklyTotal, remaining: model.currentWeeklyUsageCount)
+        let weeklyUsed = self.usedCount(total: weeklyTotal, remaining: weeklyRemaining)
+
+        return NormalizedModelUsage(
+            modelName: modelName,
+            sessionTotal: sessionTotal,
+            sessionUsed: sessionUsed,
+            sessionRemaining: sessionRemaining,
+            weeklyTotal: weeklyUnlimited ? nil : weeklyTotal,
+            weeklyUsed: weeklyUnlimited ? nil : weeklyUsed,
+            weeklyRemaining: weeklyUnlimited ? nil : weeklyRemaining,
+            isWeeklyUnlimited: weeklyUnlimited,
+            windowMinutes: self.windowMinutes(
+                start: self.dateFromEpoch(model.startTime),
+                end: self.dateFromEpoch(model.endTime)),
+            resetsAt: self.resetsAt(
+                end: self.dateFromEpoch(model.endTime),
+                remains: model.remainsTime,
+                now: now))
+    }
+
+    private static func isValidModel(_ model: MiniMaxModelRemains) -> Bool {
+        let counters = [
+            model.currentIntervalTotalCount,
+            model.currentIntervalUsageCount,
+            model.currentWeeklyTotalCount,
+            model.currentWeeklyUsageCount,
+        ]
+        return counters.contains { ($0 ?? 0) > 0 }
+    }
+
+    private static func isWeeklyUnlimited(_ model: MiniMaxModelRemains) -> Bool {
+        (model.currentWeeklyTotalCount ?? 0) == 0 && (model.currentWeeklyUsageCount ?? 0) == 0
+    }
+
+    private static func normalizedModelName(_ raw: String?) -> String {
+        let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "MiniMax" : trimmed
+    }
+
+    private static func isPrimaryTextModel(_ modelName: String) -> Bool {
+        modelName.lowercased().hasPrefix("minimax-m")
+    }
+
+    private static func normalizedTotal(_ total: Int?) -> Int? {
+        guard let total, total > 0 else { return nil }
+        return total
+    }
+
+    private static func normalizedRemaining(total: Int?, remaining: Int?) -> Int? {
+        guard let total, total > 0, let remaining else { return nil }
+        return min(max(remaining, 0), total)
+    }
+
+    private static func usedCount(total: Int?, remaining: Int?) -> Int? {
+        guard let total, total > 0, let remaining else { return nil }
+        return max(0, total - remaining)
     }
 
     private static func dateFromEpoch(_ value: Int?) -> Date? {

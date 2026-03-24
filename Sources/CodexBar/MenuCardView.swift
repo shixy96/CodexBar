@@ -649,6 +649,8 @@ struct UsageMenuCardExtraUsageSectionView: View {
 // MARK: - Model factory
 
 extension UsageMenuCardView.Model {
+    private static let miniMaxMetricLimit = 3
+
     struct Input {
         let provider: UsageProvider
         let metadata: ProviderMetadata
@@ -771,6 +773,13 @@ extension UsageMenuCardView.Model {
     }
 
     private static func usageNotes(input: Input) -> [String] {
+        if input.provider == .minimax {
+            return self.miniMaxUsageNotes(
+                displayEntries: self.miniMaxDisplayEntries(snapshot: input.snapshot),
+                style: input.resetTimeDisplayStyle,
+                now: input.now)
+        }
+
         if input.provider == .kilo {
             var notes = Self.kiloLoginDetails(snapshot: input.snapshot)
             let resolvedSource = input.sourceLabel?
@@ -795,6 +804,67 @@ extension UsageMenuCardView.Model {
         case .available: []
         case .noLimitConfigured: ["No limit set for the API key"]
         case .unavailable: ["API key limit unavailable right now"]
+        }
+    }
+
+    private struct MiniMaxDisplayEntries {
+        let metricEntries: [MiniMaxModelUsageEntry]
+        let noteEntries: [MiniMaxModelUsageEntry]
+    }
+
+    private static func miniMaxDisplayEntries(snapshot: UsageSnapshot?) -> MiniMaxDisplayEntries {
+        guard let modelEntries = snapshot?.minimaxUsage?.modelEntries, !modelEntries.isEmpty else {
+            return MiniMaxDisplayEntries(metricEntries: [], noteEntries: [])
+        }
+
+        var metricEntries: [MiniMaxModelUsageEntry] = []
+        var noteEntries: [MiniMaxModelUsageEntry] = []
+
+        // Note: model entries that cannot compute usage or lack a reset time are silently skipped.
+        // This is intentional — such entries typically indicate invalid data from the backend and need not be shown.
+        for entry in modelEntries {
+            if metricEntries.count < Self.miniMaxMetricLimit,
+               entry.normalizedSessionUsage() != nil
+            {
+                metricEntries.append(entry)
+            } else {
+                noteEntries.append(entry)
+            }
+        }
+
+        return MiniMaxDisplayEntries(metricEntries: metricEntries, noteEntries: noteEntries)
+    }
+
+    private static func miniMaxUsageNotes(
+        displayEntries: MiniMaxDisplayEntries,
+        style: ResetTimeDisplayStyle,
+        now: Date) -> [String]
+    {
+        displayEntries.noteEntries.compactMap { entry in
+            guard let resetText = entry.resetText(style: style, now: now) else { return nil }
+            return "\(entry.modelName): \(resetText)"
+        }
+    }
+
+    private static func miniMaxMetrics(input: Input, displayEntries: MiniMaxDisplayEntries) -> [Metric] {
+        guard !displayEntries.metricEntries.isEmpty else { return [] }
+        let percentStyle: PercentStyle = input.usageBarsShowUsed ? .used : .left
+
+        return displayEntries.metricEntries.enumerated().compactMap { index, entry in
+            guard let usage = entry.normalizedSessionUsage() else { return nil }
+            let value = input.usageBarsShowUsed ? usage.used : usage.remaining
+            let percent = self.clamped((Double(value) / Double(usage.total)) * 100)
+            return Metric(
+                id: "minimax-\(index)",
+                title: entry.modelName,
+                percent: percent,
+                percentStyle: percentStyle,
+                resetText: entry.resetText(style: input.resetTimeDisplayStyle, now: input.now),
+                detailText: nil,
+                detailLeftText: nil,
+                detailRightText: nil,
+                pacePercent: nil,
+                paceOnTop: true)
         }
     }
 
@@ -932,6 +1002,14 @@ extension UsageMenuCardView.Model {
 
     private static func metrics(input: Input) -> [Metric] {
         guard let snapshot = input.snapshot else { return [] }
+        if input.provider == .minimax {
+            let miniMaxMetrics = self.miniMaxMetrics(
+                input: input,
+                displayEntries: self.miniMaxDisplayEntries(snapshot: input.snapshot))
+            if !miniMaxMetrics.isEmpty {
+                return miniMaxMetrics
+            }
+        }
         if input.provider == .antigravity {
             return Self.antigravityMetrics(input: input, snapshot: snapshot)
         }

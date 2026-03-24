@@ -24,6 +24,11 @@ struct AlibabaCodingPlanProviderImplementation: ProviderImplementation {
     }
 
     @MainActor
+    func dashboardURL(context: ProviderDashboardContext) -> URL? {
+        context.settings.alibabaCodingPlanAPIRegion.dashboardURL
+    }
+
+    @MainActor
     func settingsSnapshot(context: ProviderSettingsSnapshotContext) -> ProviderSettingsSnapshotContribution? {
         _ = context
         return .alibaba(context.settings.alibabaCodingPlanSettingsSnapshot())

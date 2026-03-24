@@ -152,6 +152,99 @@ struct MiniMaxUsageParserTests {
     }
 
     @Test
+    func `parses and filters multi model coding plan remains`() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let start = 1_700_000_000_000
+        let speechEnd = start + 5 * 60 * 60 * 1000
+        let primaryEnd = start + 3 * 60 * 60 * 1000
+        let imageEnd = start + 7 * 60 * 60 * 1000
+        let json = """
+        {
+          "base_resp": { "status_code": 0 },
+          "current_subscribe_title": "Max",
+          "model_remains": [
+            {
+              "current_interval_total_count": 4000,
+              "current_interval_usage_count": 4000,
+              "model_name": "speech-hd",
+              "current_weekly_total_count": 28000,
+              "current_weekly_usage_count": 28000,
+              "start_time": \(start),
+              "end_time": \(speechEnd),
+              "remains_time": 240000
+            },
+            {
+              "current_interval_total_count": 0,
+              "current_interval_usage_count": 0,
+              "model_name": "MiniMax-Hailuo-2.3-Fast-6s-768p",
+              "current_weekly_total_count": 0,
+              "current_weekly_usage_count": 0,
+              "start_time": \(start),
+              "end_time": \(speechEnd),
+              "remains_time": 240000
+            },
+            {
+              "current_interval_total_count": 1500,
+              "current_interval_usage_count": 1450,
+              "model_name": "MiniMax-M*",
+              "current_weekly_total_count": 0,
+              "current_weekly_usage_count": 0,
+              "start_time": \(start),
+              "end_time": \(primaryEnd),
+              "remains_time": 240000
+            },
+            {
+              "current_interval_total_count": 50,
+              "current_interval_usage_count": 50,
+              "model_name": "image-01",
+              "current_weekly_total_count": 350,
+              "current_weekly_usage_count": 350,
+              "start_time": \(start),
+              "end_time": \(imageEnd),
+              "remains_time": 240000
+            }
+          ]
+        }
+        """
+
+        let snapshot = try MiniMaxUsageParser.parseCodingPlanRemains(data: Data(json.utf8), now: now)
+        let expectedPrimaryReset = Date(timeIntervalSince1970: TimeInterval(primaryEnd) / 1000)
+        let expectedSpeechReset = Date(timeIntervalSince1970: TimeInterval(speechEnd) / 1000)
+        let expectedImageReset = Date(timeIntervalSince1970: TimeInterval(imageEnd) / 1000)
+
+        #expect(snapshot.planName == "Max")
+        #expect(snapshot.availablePrompts == 1500)
+        #expect(snapshot.currentPrompts == 50)
+        #expect(snapshot.remainingPrompts == 1450)
+        #expect(abs((snapshot.usedPercent ?? 0) - (Double(50) / Double(1500) * 100)) < 0.01)
+        #expect(snapshot.resetsAt == expectedPrimaryReset)
+        #expect(snapshot.modelEntries.map(\.modelName) == ["MiniMax-M*", "speech-hd", "image-01"])
+
+        let primary = try #require(snapshot.modelEntries.first)
+        #expect(primary.sessionUsed == 50)
+        #expect(primary.sessionTotal == 1500)
+        #expect(primary.sessionResetsAt == expectedPrimaryReset)
+        #expect(primary.weeklyTotal == nil)
+        #expect(primary.weeklyUsed == nil)
+        #expect(primary.isWeeklyUnlimited)
+
+        let speech = try #require(snapshot.modelEntries.first(where: { $0.modelName == "speech-hd" }))
+        #expect(speech.sessionUsed == 0)
+        #expect(speech.sessionTotal == 4000)
+        #expect(speech.sessionResetsAt == expectedSpeechReset)
+        #expect(speech.weeklyUsed == 0)
+        #expect(speech.weeklyTotal == 28000)
+        #expect(!speech.isWeeklyUnlimited)
+
+        let image = try #require(snapshot.modelEntries.first(where: { $0.modelName == "image-01" }))
+        #expect(image.sessionUsed == 0)
+        #expect(image.sessionTotal == 50)
+        #expect(image.sessionResetsAt == expectedImageReset)
+        #expect(image.weeklyUsed == 0)
+        #expect(image.weeklyTotal == 350)
+    }
+
+    @Test
     func `parses coding plan from next data`() throws {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let start = 1_700_000_000_000
