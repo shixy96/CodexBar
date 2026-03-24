@@ -245,6 +245,48 @@ struct MiniMaxUsageParserTests {
     }
 
     @Test
+    func `prefers model with session quota data as primary remains entry`() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let start = 1_700_000_000_000
+        let end = start + 5 * 60 * 60 * 1000
+        let json = """
+        {
+          "base_resp": { "status_code": 0 },
+          "current_subscribe_title": "Max",
+          "model_remains": [
+            {
+              "model_name": "MiniMax-M*",
+              "current_interval_total_count": 0,
+              "current_interval_usage_count": 0,
+              "current_weekly_total_count": 3000,
+              "current_weekly_usage_count": 2500,
+              "start_time": \(start),
+              "end_time": \(end),
+              "remains_time": 240000
+            },
+            {
+              "model_name": "speech-hd",
+              "current_interval_total_count": 1000,
+              "current_interval_usage_count": 900,
+              "current_weekly_total_count": 0,
+              "current_weekly_usage_count": 0,
+              "start_time": \(start),
+              "end_time": \(end),
+              "remains_time": 240000
+            }
+          ]
+        }
+        """
+
+        let snapshot = try MiniMaxUsageParser.parseCodingPlanRemains(data: Data(json.utf8), now: now)
+
+        #expect(snapshot.availablePrompts == 1000)
+        #expect(snapshot.currentPrompts == 100)
+        #expect(snapshot.remainingPrompts == 900)
+        #expect(snapshot.modelEntries.map(\.modelName) == ["speech-hd", "MiniMax-M*"])
+    }
+
+    @Test
     func `parses coding plan from next data`() throws {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let start = 1_700_000_000_000

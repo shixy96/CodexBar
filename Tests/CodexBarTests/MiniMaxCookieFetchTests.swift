@@ -257,6 +257,41 @@ struct MiniMaxCookieFetchTests {
         #expect(snapshot.modelEntries.map(\.modelName) == ["MiniMax-M*"])
     }
 
+    @Test
+    func `propagates remains API failure when html parse fallback is used`() async throws {
+        let registered = URLProtocol.registerClass(MiniMaxCookieFetchStubURLProtocol.self)
+        defer {
+            if registered {
+                URLProtocol.unregisterClass(MiniMaxCookieFetchStubURLProtocol.self)
+            }
+            MiniMaxCookieFetchStubURLProtocol.handler = nil
+            MiniMaxCookieFetchStubURLProtocol.requests = []
+        }
+
+        MiniMaxCookieFetchStubURLProtocol.handler = { request in
+            guard let url = request.url else { throw URLError(.badURL) }
+
+            switch url.path {
+            case let path where path.contains("user-center/payment/coding-plan"):
+                return Self.makeHTMLResponse(url: url, body: "<div>unexpected html that no longer matches parser</div>")
+
+            case let path where path.contains("v1/api/openplatform/coding_plan/remains"):
+                return Self.makeJSONResponse(url: url, body: "{\"error\":\"upstream outage\"}", statusCode: 503)
+
+            default:
+                return Self.makeJSONResponse(url: url, body: "{}", statusCode: 404)
+            }
+        }
+
+        await #expect(throws: MiniMaxUsageError.apiError("HTTP 503")) {
+            _ = try await MiniMaxUsageFetcher.fetchUsage(
+                cookieHeader: "session=test-cookie",
+                region: .global,
+                environment: [:],
+                now: Date(timeIntervalSince1970: 1_700_000_000))
+        }
+    }
+
     private static func makeHTMLResponse(
         url: URL,
         body: String,

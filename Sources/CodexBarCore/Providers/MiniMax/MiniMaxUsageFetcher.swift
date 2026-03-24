@@ -16,6 +16,11 @@ public struct MiniMaxUsageFetcher: Sendable {
         let groupID: String?
     }
 
+    private enum RemainsAwaitOutcome {
+        case completed(Result<MiniMaxUsageSnapshot, Error>)
+        case timedOut
+    }
+
     public static func fetchUsage(
         cookieHeader: String,
         authorizationToken: String? = nil,
@@ -63,15 +68,19 @@ public struct MiniMaxUsageFetcher: Sendable {
             let remainsSnapshot = await self.awaitRemainsWithTimeout(
                 remainsTask: remainsTask,
                 timeoutNanoseconds: Self.remainsEnrichmentTimeoutNanoseconds)
-            if let remainsSnapshot {
+            if case let .completed(.success(remainsSnapshot)) = remainsSnapshot {
                 return self.mergedSnapshot(remains: remainsSnapshot, html: htmlSnapshot)
             }
             return htmlSnapshot
         } catch let error as MiniMaxUsageError {
             if case .parseFailed = error {
                 Self.log.debug("MiniMax coding plan HTML parse failed, trying remains API")
-                if let snapshot = await self.awaitRemains(remainsTask: remainsTask) {
+                switch await self.awaitRemains(remainsTask: remainsTask) {
+                case let .success(snapshot):
                     return snapshot
+                case let .failure(remainsError):
+                    remainsTask.cancel()
+                    throw remainsError
                 }
             }
             remainsTask.cancel()
@@ -147,27 +156,22 @@ public struct MiniMaxUsageFetcher: Sendable {
     /// remainsTask.cancel() sets the cancellation flag but cannot abort an already-started network request;
     /// the response will simply be discarded.
     private static func awaitRemains(
-        remainsTask: Task<Result<MiniMaxUsageSnapshot, Error>, Never>) async -> MiniMaxUsageSnapshot?
+        remainsTask: Task<Result<MiniMaxUsageSnapshot, Error>, Never>) async -> Result<MiniMaxUsageSnapshot, Error>
     {
-        switch await remainsTask.value {
-        case let .success(snapshot):
-            snapshot
-        case .failure:
-            nil
-        }
+        await remainsTask.value
     }
 
     private static func awaitRemainsWithTimeout(
         remainsTask: Task<Result<MiniMaxUsageSnapshot, Error>, Never>,
-        timeoutNanoseconds: UInt64) async -> MiniMaxUsageSnapshot?
+        timeoutNanoseconds: UInt64) async -> RemainsAwaitOutcome
     {
-        await withTaskGroup(of: MiniMaxUsageSnapshot?.self) { group in
+        await withTaskGroup(of: RemainsAwaitOutcome.self) { group in
             group.addTask {
-                await self.awaitRemains(remainsTask: remainsTask)
+                await .completed(self.awaitRemains(remainsTask: remainsTask))
             }
             group.addTask {
                 try? await Task.sleep(nanoseconds: timeoutNanoseconds)
-                return nil
+                return .timedOut
             }
             // The first task to complete wins — either the remains result or the timeout
             let first = await group.next()
@@ -177,7 +181,7 @@ public struct MiniMaxUsageFetcher: Sendable {
             case let .some(result):
                 return result
             case .none:
-                return nil
+                return .timedOut
             }
         }
     }
@@ -561,6 +565,10 @@ enum MiniMaxUsageParser {
         let windowMinutes: Int?
         let resetsAt: Date?
 
+        var hasSessionQuotaData: Bool {
+            self.sessionTotal != nil && self.sessionRemaining != nil
+        }
+
         var entry: MiniMaxModelUsageEntry {
             MiniMaxModelUsageEntry(
                 modelName: self.modelName,
@@ -667,7 +675,7 @@ enum MiniMaxUsageParser {
         now: Date) -> [NormalizedModelUsage]
     {
         let normalized = models.compactMap { self.normalizeModelUsage($0, now: now) }
-        guard let primaryIndex = normalized.firstIndex(where: { self.isPrimaryTextModel($0.modelName) }) else {
+        guard let primaryIndex = self.primaryModelIndex(in: normalized) else {
             return normalized
         }
 
@@ -676,6 +684,16 @@ enum MiniMaxUsageParser {
             index == primaryIndex ? nil : model
         })
         return ordered
+    }
+
+    private static func primaryModelIndex(in models: [NormalizedModelUsage]) -> Int? {
+        if let index = models.firstIndex(where: { self.isPrimaryTextModel($0.modelName) && $0.hasSessionQuotaData }) {
+            return index
+        }
+        if let index = models.firstIndex(where: \.hasSessionQuotaData) {
+            return index
+        }
+        return models.firstIndex(where: { self.isPrimaryTextModel($0.modelName) })
     }
 
     private static func normalizeModelUsage(_ model: MiniMaxModelRemains, now: Date) -> NormalizedModelUsage? {
