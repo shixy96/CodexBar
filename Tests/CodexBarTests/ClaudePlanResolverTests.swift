@@ -12,6 +12,20 @@ struct ClaudePlanResolverTests {
     }
 
     @Test
+    func `oauth subscription type maps pro when rate limit tier is generic`() {
+        #expect(
+            ClaudePlan.oauthLoginMethod(
+                subscriptionType: "pro",
+                rateLimitTier: "default_claude_ai")
+                == "Claude Pro")
+        #expect(
+            ClaudePlan.oauthLoginMethod(
+                subscriptionType: nil,
+                rateLimitTier: "default_claude_ai")
+                == nil)
+    }
+
+    @Test
     func `web fallback preserves stripe Claude compatibility`() {
         #expect(
             ClaudePlan.webLoginMethod(
